@@ -1,0 +1,1208 @@
+---
+title: "Principal component analysis and Portfolio Optimization"
+output:
+  html_document: default
+  pdf_document: default
+  latex_engine: xelatex
+date: "2025-02-16"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Load required packages
+
+```{r, message=FALSE}
+pkg_list = c("quantmod", "TTR", 'zoo', 'tseries', 'fGarch','PEIP','tidyverse',
+             'gridExtra', 'gdata', 'xtable', "aTSA", "dygraphs", "urca","igraph","timetk","forecast",
+             "ppcor","leiden","writexl","psych")
+# Function to install required packages if needed
+for (pkg in pkg_list)
+{
+  # Try loading the library.
+  if (!library(pkg, logical.return=TRUE, character.only=TRUE))
+    {
+         # If the library cannot be loaded, install first and then load.
+        install.packages(pkg)
+        library(pkg, character.only=TRUE)
+  }
+}
+
+```
+
+```{r}
+library(quantmod)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(quadprog)
+library(psych)
+library(TTR)
+library(zoo)
+library(tseries)
+library(fGarch)
+library(PEIP)
+library(tidyverse)
+library(gridExtra)
+library(gdata)
+library(xtable)
+library(aTSA)
+library(dygraphs)
+library(urca)
+library(igraph)
+library(timetk)
+library(forecast)
+library(ppcor)
+library(leiden)
+library(writexl)
+library('tidyquant')
+library('plotly')
+library('GA')
+library('rvest')
+library("dygraphs")
+
+```
+
+```{r}
+# Define stock symbols 
+tick <- c('AAPL','NVDA','MSFT','AVGO','ORCL',
+          'BRK-B','JPM','V','MA','BAC',
+          'AMZN','TSLA','MCD','NKE','SBUX',
+          'LLY','UNH','JNJ','ABBV','MRK',
+          'GOOG','META','NFLX','TMUS','DIS',
+          'CAT','GE','RTX','UNP','ETN',
+          'WMT','COST','PG','KO','PEP',
+          'XOM','COP','EOG','WMB','EPD',
+          'LIN','SHW','SCCO','FCX','ECL',
+          'PLD','AMT','EQIX','WELL','SPG',
+          'NEE','SO','DUK','SRE','PCG')
+start_date <- '2015-01-01'
+end_date <- '2024-12-31'
+
+price_data <- lapply(tick, function(ticker) {
+  # Download data
+  data <- getSymbols(ticker, src = 'yahoo', from = start_date, to = end_date, auto.assign = FALSE)
+  
+  # Extract adjusted closing prices
+  adj_close <- Ad(data)
+  
+  # Rename column to the ticker symbol
+  colnames(adj_close) <- ticker
+  
+  return(adj_close)
+})
+
+# Combine the data into a single data frame
+stocks <- as.data.frame(do.call(cbind, price_data))
+stocks <- na.omit(stocks)
+colnames(stocks) <- colnames(stocks)
+N.asset <- ncol(stocks)
+
+# Extract dates from row names and add as a new Date column
+stocks$Date <- as.Date(rownames(stocks))  
+
+# Move Date to the first column
+stock_data <- stocks %>% relocate(Date)
+
+# Convert to long format for ggplot
+long_data <- stocks %>%
+  pivot_longer(cols = -Date, names_to = "Stock", values_to = "Price")
+
+# Plot stock price trends
+ggplot(long_data, aes(x = Date, y = Price, color = Stock)) +
+  geom_line(size = 0.8, alpha = 0.8) +
+  labs(title = "Stock Price Trends for 55 Stocks", x = "Date", y = "Price") +
+  theme_minimal() +
+  theme(legend.position = "none")  # Hide legend if too crowded
+
+
+
+```
+
+#Calculate stock returns
+```{r}
+# Compute daily returns (Pt/Pt-1) -1
+returns_data <- stock_data[-1,-1 ] / stock_data[-nrow(stock_data), -1] - 1
+returns_data<-as.data.frame(returns_data)
+#numerator : extracts all stock prices excluding the first row and first column (date).
+#denominator :Removes the last row (we need t-1 values but not t) and first column
+main.names<-colnames(returns_data)
+#sample correlation
+rho.cal<-function(X){
+  rho.hat<-cor(sign(X-mean(X)), X-mean(X))
+  return(rho.hat)
+}
+ret.0.cc<-returns_data
+for(j in 1:N.asset){
+  ret.0.cc[, j]<-returns_data[, j]-mean(returns_data[, j])
+}
+rho<-apply(as.matrix(returns_data), MARGIN=2, FUN=rho.cal)
+
+#calculate degree of freedom
+nu<-rep(0, N.asset)
+for(i in 1:N.asset){
+  fun <- function (x) rho[i]*(x-1)*beta(x/2,1/2)-2*sqrt(x-2)
+  nu[i] <- uniroot(fun, c(2, 8))$root
+}
+number<-ncol(returns_data)
+acf.s<-rep(0, number)
+acf.abs<-rep(0, number)
+acf.sq<-rep(0, number)
+for(j in 1:number){
+  acf.s[j]<-acf(ret.0.cc[, j], plot=FALSE)$acf[2]
+  acf.abs[j]<-acf(abs(ret.0.cc[, j]), plot=FALSE)$acf[2]
+  acf.sq[j]<-acf(ret.0.cc[, j]^2, plot=FALSE)$acf[2]
+}
+corr<-data.frame(apply(returns_data, 2, mean), apply(returns_data, 2, sd),
+                 apply(returns_data, 2, kurtosis),apply(returns_data, 2, skewness),acf.s, acf.abs,
+                 acf.sq, rho, nu)
+rownames(corr)<-main.names
+colnames(corr)<-c("mean", "sd","kurtosis","skewness","series", "abs", "sq", "sign-rho", "df")
+xtable(corr, digits=4)
+
+min(corr$kurtosis)
+max(corr$kurtosis)
+
+```
+
+```{r}
+number<-9 ## change number from 0 to 9
+index <-number+1
+rolling_size <- 21*number ##
+#returns_data <- returns_data[c((1+rolling_size):(2268+rolling_size)),]  
+## [1:2289, 21:2310, ] 
+#1 window contain approximately 1 year (2268 data points) + 1 month (21 days)
+
+train_returns_data <-returns_data[c((1+rolling_size):(2268+rolling_size)),]   # train 9 years (2268 data)
+test_returns_data <- returns_data[(2268+rolling_size+1):(2268+rolling_size+22), ] # test 1 month (21 days)
+n_forecast<-nrow(test_returns_data)
+n_train<-nrow(train_returns_data)
+colnames(train_returns_data)<-colnames(returns_data)
+```
+
+
+
+# 2.RMT filtering function
+```{r}
+
+# Parameters
+N <- N.asset   # Number of assets
+T <- n_train    # Number of time periods
+Q <- N / T  # Aspect ratio
+
+# RMT filtering function
+filter_rmt <- function(C, df_t) {
+  eig <- eigen(C)
+  eigvals <- eig$values
+  eigvecs <- eig$vectors
+  
+  theoretical_scaling <- df_t / (df_t - 2)
+  
+  if (df_t > 4) {
+    kurtosis_factor <- 3 + (6 / (df_t - 4)) 
+  } else {
+    kurtosis_factor <- 2
+  }
+  
+  lambda_min <- (1 - sqrt(Q * kurtosis_factor))^2 * theoretical_scaling
+  lambda_max <- (1 + sqrt(Q * kurtosis_factor))^2 * theoretical_scaling
+  
+  informative <- eigvals > lambda_max
+  bulk_mean <- mean(eigvals[!informative])
+  
+  C_filtered <- matrix(0, nrow(C), ncol(C))
+  
+  if (sum(informative) > 0) {
+  D <- diag(as.numeric(eigvals[informative]), sum(informative), sum(informative))
+  C_filtered <- eigvecs[, informative, drop=FALSE] %*% D %*% t(eigvecs[, informative, drop=FALSE])
+} else {
+  C_filtered <- matrix(0, nrow(C), ncol(C))  # No informative components
+}
+  
+  C_filtered <- C_filtered + bulk_mean * diag(nrow(C))
+  
+  return(C_filtered)
+}
+```
+
+
+#function to threshold the matrix
+
+```{r}
+thresh_matrix<-function(mat){
+  threshold_values<-seq(0, 0.75, by = 0.01)
+
+# Loop through each threshold value
+for (threshold in threshold_values) {
+  # Apply the threshold to the Pearson correlation matrix
+  matrix_thresholded <- abs(mat) > threshold & abs(mat) <1
+  
+  # Create the network graph from the thresholded correlation matrix
+  netw <- graph_from_adjacency_matrix(as.matrix(matrix_thresholded), mode = "undirected")
+  
+  # Check if the graph is connected
+  if (is.connected(netw)) {
+    
+  } else {
+    # If the graph is disconnected,
+    message("Graph is disconnected at threshold = ", threshold, ". Stopping the loop.")
+    # reset the matrix and network
+    matrix_thresholded <- abs(mat) > threshold-0.01  & abs(mat) <1
+    return(matrix_thresholded)
+    
+    #stop the loop
+    break
+  }
+}
+}
+```
+
+
+#1. Emperical Covariance matrix
+```{r}
+emp_cov_mat<-cov(train_returns_data)
+
+```
+
+# 2.Emperical Covariance matrix from RMT
+```{r}
+# Construct filtered covariance matrix
+emp_cov_filtered<-filter_rmt(emp_cov_mat,3)
+```
+
+# Emperical correlation network
+```{r}
+emp_cor_matrix<-cor(train_returns_data)
+emp_cor_matrix_thresholded<-thresh_matrix(emp_cor_matrix)
+emp_cor_network <- graph_from_adjacency_matrix(as.matrix(emp_cor_matrix_thresholded), mode = "undirected")
+avg_degree <- mean(degree(emp_cor_network)) 
+# Open a PNG device 
+png(paste(index,"emp_cor_network.png"), width = 800, height = 600) 
+# Create the plot 
+network_plot<-plot(emp_cor_network, layout = layout_with_fr(emp_cor_network), vertex.label = colnames(stock_data[,-1]),
+         vertex.size = 10, vertex.color = "skyblue", vertex.label.color = "black",vertex.label.cex=0.5,vertex.label.dist=2,
+         edge.color = "gray", main = "Emperical Correlation Financial Network")
+mtext(paste("Avg Degree:", round(avg_degree, 2)), 
+      side = 1, line = -5, cex = 1.2)
+# Close the device and save the file 
+dev.off()
+```
+
+
+# Neuro Correlation
+
+
+
+# Neuro correlation network
+```{r}
+
+# Create an empty list to store residuals
+residuals_list <- list()  # To store residuals
+
+# Initialize an empty data frame to store NNETAR model orders
+nnetar_results <- data.frame(
+  Stock = character(),
+  NNETAR_Order = character(),
+  stringsAsFactors = FALSE
+)
+
+# Loop through each stock
+for (i in 1:N.asset) {
+  # Fit NNETAR model 
+  nnetar_model <- nnetar(train_returns_data[,i])
+   # Collect NNETAR order (p, P, k)
+  nnetar_order <- paste("(", nnetar_model$p, ",", nnetar_model$P, ",", nnetar_model$size, ")", sep = "")
+  
+  # Append the results to the data frame
+  nnetar_results <- rbind(nnetar_results, data.frame(
+    Stock = colnames(train_returns_data)[i],
+    NNETAR_Order = paste("NNAR", nnetar_order)
+  ))
+  
+  residuals <- residuals(nnetar_model)
+  residuals_list[[i]] <- residuals
+  #print(length(residuals_list[[i]]))
+  #print(summary(arima_model))
+  #residuals_df <- cbind(res residuals_list[[i]])
+}
+
+
+# # Split the results into three groups for the table layout
+# group1 <- nnetar_results[1:10, ]
+# group2 <- nnetar_results[11:20, ]
+# group3 <- nnetar_results[21:30, ]
+# 
+# # Combine the groups into a 10x6 data frame
+# combined_df <- data.frame(
+#   Stock1 = group1$Stock, Model1 = group1$NNETAR_Order,
+#   Stock2 = group2$Stock, Model2 = group2$NNETAR_Order,
+#   Stock3 = group3$Stock, Model3 = group3$NNETAR_Order
+# )
+# 
+# # Convert the combined data frame to LaTeX table
+# print(xtable(combined_df, caption = "NNAR Models of Asset prices", label = "tab:NNETAR_reshaped"),
+#       include.rownames = FALSE,
+#       caption.placement = "top")
+
+residuals_df <- do.call(cbind,residuals_list)
+residuals_df<-as.data.frame(residuals_df)
+residuals_df<-na.omit(residuals_df)
+colnames(residuals_df) <- colnames(returns_data)
+
+# Compute correlation matrix of residuals
+# Standardize data (important for PCA)
+data_scaled <- as.data.frame(scale(residuals_df))
+NNETAR_res_cor_matrix <- cor(data_scaled)
+
+
+NNETAR_cor_matrix_thresholded<-thresh_matrix(NNETAR_res_cor_matrix)
+NNETAR_cor_network <- graph_from_adjacency_matrix(as.matrix(NNETAR_cor_matrix_thresholded), mode = "undirected")
+avg_degree <- mean(degree(NNETAR_cor_network)) 
+
+# Open a PNG device 
+png(paste(index,"network.png"), width = 800, height = 600) 
+# Create the plot 
+network_plot<-plot(NNETAR_cor_network, layout = layout_with_fr(NNETAR_cor_network), vertex.label = colnames(stock_data[,-1]),
+         vertex.size = 10, vertex.color = "skyblue", vertex.label.color = "black",vertex.label.cex=0.5,vertex.label.dist=2,
+         edge.color = "gray", main = "Neuro Correlation Financial Network")
+mtext(paste("Avg Degree:", round(avg_degree, 2)), 
+      side = 1, line = 1, cex = 1.2)
+
+# Close the device and save the file 
+dev.off()
+
+```
+
+
+The Laplacian matrix is a fundamental concept in graph theory. It is used to analyze network connectivity and systemic dependencies in financial markets.
+
+The Laplacian matrix $L$ is derived from a financial network, where each asset is a node and the edges represent relationships (often based on correlations or dependencies).
+
+For an undirected weighted network, the Laplacian matrix is defined as:
+$L = D - A$
+where:
+$A$ is the adjacency matrix of the financial network.
+$D$ is the degree matrix (a diagonal matrix where $D_{ii}$ is the sum of all weights connected to node $i$).
+
+
+In financial networks:
+
+The adjacency matrix $A$ is often derived from the correlation matrix $C$, where: $A_{ij} = |C_{ij}|$
+(taking absolute values ensures all relationships are positive).
+The degree matrix $D$ contains the sum of connections (or correlations) for each asset.
+
+
+Properties
+
+\textbf{Symmetric}: $L = L^{\prime}$.
+\textbf{Positive semi-definite}: All eigenvalues $\lambda \geq 0$.
+\textbf{First eigenvalue}: $\lambda_1 = 0$, and the corresponding eigenvector is a constant vector.
+\textbf{Second smallest eigenvalue} ($\lambda_2$, the Fiedler value) measures network connectivity:
+If $\lambda_2$ is small, the network is fragile (disconnected clusters).
+If $\lambda_2$ is large, the network is well-connected (strong market integration).
+
+
+Application in Finance
+
+Systemic Risk Analysis: Identifies fragility in financial markets.
+Market Cluster Detection: Identifies how different stocks or sectors are linked.
+Stress Testing: Evaluates how the market would behave under shocks.
+Default Contagion Modeling: Identifies how financial crises spread.
+
+
+Key Differences: Covariance Matrix vs. Laplacian Matrix
+
+Definition Measures return co-movement (risk relationships) Measures network connectivity (graph structure).
+Construction Based on return variances & covariances Based on network edges (correlations).
+Interpretation Quantifies risk & diversification Captures market connectivity & fragility.
+Largest Eigenvalue Dominant risk factor Maximum connectivity mode.
+Smallest Eigenvalue Diversifiable risk Measures network stability (if close to 0, market is fragile).
+Eigenvectors Define principal components (PCA) Define clusters & systemic risk propagators.
+Applications Portfolio optimization, PCA, risk analysis Market structure analysis, systemic risk.
+
+
+Key Insights from the Example:
+
+Covariance Matrix:
+
+Measures risk & co-movement.
+Eigenvalues tell us about system-wide risk.
+Largest eigenvector represents the market factor.
+
+
+Laplacian Matrix:
+
+itemize
+Measures market connectivity.
+If the smallest nonzero eigenvalue ($\lambda_2$) is close to zero, the market is fragmented.
+Eigenvectors help identify market clusters.
+
+
+
+Conclusion
+
+itemize
+Covariance matrix is used for risk analysis and portfolio optimization.
+Laplacian matrix is used for network analysis and systemic risk detection.
+Eigenvalues of covariance matrix describe return variance.
+Eigenvalues of Laplacian matrix describe market connectivity.
+
+
+
+Practical Implications
+
+In normal markets, the largest covariance eigenvalue dominates, meaning a few stocks drive market risk.
+During crises, the smallest Laplacian eigenvalue approaches zero, indicating market fragility and higher risk of contagion.
+
+
+
+# 3. Neuro covariance matrix 
+
+Using scaled data
+
+```{r}
+neuro_cov_mat <- cov(data_scaled) 
+
+```
+
+
+ [1] 18.90  4.26  3.97  1.77  1.59  1.28  1.14  1.02  0.96  0.86  0.85  0.82
+[13]  0.77  0.74  0.71  0.69  0.66  0.64  0.62  0.61  0.60  0.58  0.53  0.52
+[25]  0.50  0.50  0.47  0.47  0.45  0.43  0.43  0.42  0.41  0.40  0.37  0.36
+[37]  0.35  0.34  0.33  0.33  0.31  0.30  0.29  0.28  0.26  0.25  0.24  0.23
+[49]  0.22  0.21  0.19  0.17  0.14  0.14  0.12
+
+Interpretation of Principal Components Eigenvalues (Variance Explained) 
+• PC1 (18.9) explains ~34% of variance (main market movement). 
+• PC2 (4.26) explains ~8% of variance 
+• PC3 (3.97) explains only ~7% of variance 
+• PC4 (1.77) explains only ~3% of variance 
+• PC5 (1.59) explains only ~2% of variance 
+• PC6 (1.28) explains only ~2% of variance 
+continues...
+
+
+ • PC1 captures the overall stock market movement. 
+ • PC2,PC3,PC4,...PC35 isolates company-specific variations.
+Final Conclusion 
+• PCA simplifies financial data by reducing multiple stock returns into a few key trends. 
+• PC1 captures overall market trends. 
+• PC2,PC3,PC4 captures individual stock behaviors. 
+• We eliminate noise (PC5,...PC55) and reduce dimensionality while keeping 60% of the information. 
+
+
+# 4.Neuro Covariance matrix from RMT
+```{r}
+# Construct filtered covariance matrix
+neuro_cov_filtered<-filter_rmt(neuro_cov_mat,3)
+```
+
+# 5.Data driven covariance matrix
+
+risk-free rate
+```{r}
+#risk-free rate for this study is the average treasury bill rate (T-bill rate) from April 1st, 2020, to February 18, 2022. All the data are obtained from Bloomberg.
+
+#Rf <- read.csv("Tbill_Jan.csv")
+rf_rate<-0.0447
+rf_rate_daily <- (1 + rf_rate)^(1/252) - 1
+mufree <- rf_rate_daily
+
+R<-as.matrix(train_returns_data)
+```
+
+
+```{r}
+rho<-rep(0, N.asset)
+for(j in 1:N.asset){
+  rho[j]<-cor(R[, j]-mean(R[, j]), sign(R[, j]-mean(R[, j])))
+}
+names(rho)<-colnames(returns_data)
+rho
+nu<-rep(0, N.asset)
+for(j in 1:N.asset){
+  fun <- function (x) rho[j]*(x-1)*beta(x/2,1/2)-2*sqrt(x-2)
+  nu[j] <- uniroot(fun, c(2, 8))$root
+}
+nu
+```
+
+
+Data Driven:
+```{r}
+#### choosing optimal alpha for EWMA
+dd.alpha<-function(Z){
+  alpha<-seq(0.01, 0.3, 0.01)
+  t<-length(Z)
+  cut.t<-200
+  MSE_alpha<-rep(0, length(alpha))
+  for(a in 1:length(alpha)){
+    s<-mean(Z[1:cut.t])
+    error<-rep(0, t)
+    for(i in 1:t){
+      error[i]<-Z[i]-s
+      s<-alpha[a]*Z[i]+(1-alpha[a])*s
+    }
+    MSE_alpha[a]<-mean(error[-(1:cut.t)]^2)
+  }
+  alpha.opt<-alpha[which.min(MSE_alpha)]
+  return(alpha.opt)
+}
+```
+
+
+
+```{r}
+#### data driven method to forecast volatility
+dd.vol<-function(y){
+  t<-length(y)
+  
+  rho<-cor(y-mean(y), sign(y-mean(y)))
+  vol<-abs(y-mean(y))/rho
+  #rho_vol <- cor(abs(y-mean(y)),(y-mean(y))^2)
+  #vol <- sqrt(1-rho_vol^2)*sd(y)
+    
+  alpha<-dd.alpha(vol)
+  cut.t<-500
+  s<-mean(vol[1:cut.t])
+  for(i in 1:t){
+    s<-alpha*vol[i]+(1-alpha)*s
+  }
+  return(s)
+}
+```
+
+
+# Function to calculate standardized residuals
+```{r}
+#### data driven approach to calculate residuals
+dd.res<-function(y){
+  
+  rho<-cor(y-mean(y), sign(y-mean(y)))
+  vol<-abs(y-mean(y))/rho
+  #rho_vol <- cor(abs(y-mean(y)),(y-mean(y))^2)
+  #vol <- sqrt(1-rho_vol^2)*sd(y)
+  
+  alpha<-dd.alpha(vol)
+  cut.t<-500
+  s<-mean(vol[1:cut.t])
+  t<-length(y)
+  res<-y
+  for(i in 1:t){
+    res[i]<-(y[i]-mean(y))/s
+    s<-alpha*vol[i]+(1-alpha)*s
+  }
+  return(res)
+}
+```
+
+# Function to calculate data driven correlation matrix
+```{r}
+dd.cor.mat<-function(R){
+  R.res<-R
+  for(j in 1:ncol(R)){
+    R.res[, j]<-dd.res(R[, j])
+  }
+  cor_mat<-cor(R.res)
+  return(cor_mat)
+}
+```
+
+
+```{r}
+dd<-function(y){
+  alpha<-seq(0.01, 0.3, 0.01)
+  t<-length(y)
+  cut.t<-500 
+  
+  rho<-cor(y-mean(y), sign(y-mean(y)))
+  vol<-abs(y-mean(y))/rho
+  #rho_vol <- cor(abs(y-mean(y)),(y-mean(y))^2)
+  #vol <- sqrt(1-rho_vol^2)*sd(y)
+  
+  MSE_alpha<-rep(0, length(alpha))
+  sn<-rep(0, length(alpha))
+  for(a in 1:length(alpha)){
+    s<-mean(vol[1:cut.t])
+    error<-rep(0, t)
+    for(i in 1:t){
+      error[i]<-vol[i]-s
+      s<-alpha[a]*vol[i]+(1-alpha[a])*s
+    }
+    MSE_alpha[a]<-mean(error[-(1:cut.t)]^2) # mean squared error
+    sn[a]<-s
+  }
+  vol.fore<-sn[which.min(MSE_alpha)]
+  return(vol.fore)
+}
+```
+
+
+```{r}
+mean_vect = apply(R,2,mean)
+#mean_vect
+
+cor_mat<-dd.cor.mat(R)
+#cor_mat
+
+sd_vect<-apply(R, 2, dd)
+#sd_vect
+
+dd_cov_mat<-sd_vect%*%t(sd_vect)*cor_mat
+#cov_mat
+
+
+```
+
+# data driven correlation network
+```{r}
+dd_cor_matrix<-dd.cor.mat(R)
+dd_cor_matrix_thresholded<-thresh_matrix(dd_cor_matrix)
+dd_cor_network <- graph_from_adjacency_matrix(as.matrix(dd_cor_matrix_thresholded), mode = "undirected")
+avg_degree <- mean(degree(dd_cor_network)) 
+# Open a PNG device 
+png(paste(index,"dd_cor_network.png"), width = 800, height = 600) 
+# Create the plot 
+network_plot<-plot(dd_cor_network, layout = layout_with_fr(dd_cor_network), vertex.label = colnames(stock_data[,-1]),
+         vertex.size = 10, vertex.color = "skyblue", vertex.label.color = "black",vertex.label.cex=0.5,vertex.label.dist=2,
+         edge.color = "gray", main = "Data driven Correlation Financial Network")
+mtext(paste("Avg Degree:", round(avg_degree, 2)), 
+      side = 1, line = -4, cex = 1.2)
+
+# Close the device and save the file 
+dev.off()
+```
+
+# 6.Data driven covariance matrix filtered
+```{r}
+# Construct filtered covariance matrix
+dd_cov_filtered<-filter_rmt(dd_cov_mat,3)
+```
+
+
+# Comparing Minimum Variance Portfolio (MVP) Tangency Portfolio (TP) and Eigen Portfolio (EP)
+
+## Overview
+To compare the **Minimum Variance Portfolio (MVP)** based on the smallest eigenvalue’s eigenvector and a **Risk-Return Optimized Portfolio** (such as the **Tangency Portfolio**), we need to:
+
+1. Compute the MVP by minimizing portfolio risk(variance) (Minimum Variance Portfolio) - MVP
+    MVP_emp, MVP_empf, MVP_dd, MVP_ddf, MVP_neuro, MVP_neurof
+3. Compute the Tangency Portfolio by optimizing for the highest Sharpe ratio.(Tangency Portfolio) - TP
+    TP_emp, TP_empf, TP_dd, TP_ddf, TP_neuro, TP_neurof
+2. Compute the EP using the smallest eigenvalue’s eigenvector.(Eigen Portfolio) - EP
+    EP_emp, EP_empf, EP_dd, EP_ddf, EP_neuro, EP_neurof
+4. Compute Equally weighted portfolio (EQW)
+
+### 1. Solve for Minimum Variance Portfolio Weights 
+The minimum variance portfolio (MVP) minimizes portfolio risk (variance) subject to the constraint that the sum of weights is 1
+Solve Using Quadratic Programming 
+
+```{r}
+
+MVP_function<-function(cov_mat){
+  # Number of stocks 
+n_assets <- ncol(train_returns_data) 
+
+# Objective: Minimize portfolio variance (w' sigma w) 
+lambda <- 1e-5  # Small regularization constant
+Dmat <- cov_mat + diag(lambda, nrow(cov_mat))
+
+
+# Covariance matrix  
+dvec <- rep(0, n_assets)  # No linear return term 
+
+# Constraints: sum of weights = 1 
+Amat <- matrix(1, nrow = n_assets, ncol = 1)  # Ensure correct dimensions
+bvec <- 1  # Constraint value (sum of weights = 1)
+meq <- 1  # Equality constraint 
+
+# Solve quadratic optimization problem 
+mvp_solution <- solve.QP(Dmat, dvec, Amat, bvec, meq) 
+
+# Extract weights 
+mvp_weights <- mvp_solution$solution 
+return(mvp_weights)
+
+}
+
+```
+
+
+```{r}
+library(writexl)
+
+# Combine weights into a data frame
+MVP_weights_df <- data.frame(
+MVP_emp_weights<-MVP_function(emp_cov_mat),
+MVP_emp_f_weights<-MVP_function(emp_cov_filtered),
+MVP_dd_weights<-MVP_function(dd_cov_mat),
+MVP_dd_f_weights<-MVP_function(dd_cov_filtered),
+MVP_neuro_weights<-MVP_function(neuro_cov_mat),
+MVP_neuro_f_weights<-MVP_function(neuro_cov_filtered)
+)
+
+# Save as an Excel file
+write_xlsx(MVP_weights_df, "MVP_portfolio_weights.xlsx")
+
+
+```
+
+
+### 2. Compute the Tangency Portfolio
+The Tangency Portfolio maximizes the **Sharpe ratio**, which is the ratio of excess return to risk (standard deviation). This portfolio considers both the **covariance matrix** and **expected returns**. 
+
+```{r}
+# expected returns 
+expected_returns <- colMeans(train_returns_data)  
+
+# Risk-free rate 
+rf_rate<-0.0425 # annual rate
+rf_rate_daily <- (1 + rf_rate)^(1/252) - 1 # daily rate
+
+# Compute excess returns (expected returns - risk-free rate)
+excess_returns <- expected_returns - rf_rate_daily
+
+TP_function<-function(cov_mat){
+  # Solve for the Tangency Portfolio weights (maximize Sharpe ratio)
+lambda <- 1e-5  # Small regularization constant
+Dmat <- cov_mat + diag(lambda, nrow(cov_mat))
+dvec <- excess_returns  # Excess returns (n x 1)
+
+# Correctly define Amat: First row ensures sum(weights) = 1
+n_assets <- length(expected_returns)  # Number of assets
+Amat <- rbind(rep(1, n_assets))  # 1 row, n_assets columns
+
+# Constraint: weights sum to 1
+bvec <- 1  
+
+# Solve quadratic optimization problem
+tangency_solution <- solve.QP(Dmat, dvec, t(Amat), bvec, meq = 1)
+
+# Extract Tangency Portfolio weights
+tangency_weights <- tangency_solution$solution
+return(tangency_weights)  
+}
+
+```
+
+
+```{r}
+
+
+# Combine weights into a data frame
+TP_weights_df <- data.frame(
+TP_emp_weights<-TP_function(emp_cov_mat),
+TP_emp_f_weights<-TP_function(emp_cov_filtered),
+TP_dd_weights<-TP_function(dd_cov_mat),
+TP_dd_f_weights<-TP_function(dd_cov_filtered),
+TP_neuro_weights<-TP_function(neuro_cov_mat),
+TP_neuro_f_weights<-TP_function(neuro_cov_filtered)
+)
+
+# Save as an Excel file
+write_xlsx(TP_weights_df, "TP_portfolio_weights.xlsx")
+```
+
+### 2.Compute Eigen Portfolio (EP) from smallest eigenvalue’s eigenvector.
+
+
+```{r}
+
+EP_function<-function(cov_mat){
+
+# Perform eigendecomposition
+eigen_decomp <- eigen(cov_mat)
+eigvals <- eigen_decomp$values
+eigvals
+eigvecs <- eigen_decomp$vectors
+
+index_smallest_eigenvalue<-N.asset
+# Extract the corresponding eigenvector (usually last column) 
+#Each column in eig$vectors corresponds to an eigenvector.
+ep_weights_eigen <- eigvecs[, index_smallest_eigenvalue]
+# Name the elements for better interpretation
+names(ep_weights_eigen) <- colnames(stock_data[,-1])
+#ep_weights_eigen
+
+# Normalize absolute value of weights (to sum to 1)
+ep_weights_eigen <- abs(ep_weights_eigen) / sum(abs(ep_weights_eigen))
+return(ep_weights_eigen)
+}
+
+```
+
+
+```{r}
+
+# Combine weights into a data frame
+EP_weights_df <- data.frame(
+EP_emp_weights<-EP_function(emp_cov_mat),
+EP_emp_f_weights<-EP_function(emp_cov_filtered),
+EP_dd_weights<-EP_function(dd_cov_mat),
+EP_dd_f_weights<-EP_function(dd_cov_filtered),
+EP_neuro_weights<-EP_function(neuro_cov_mat),
+EP_neuro_f_weights<-EP_function(neuro_cov_filtered)
+)
+
+# Save as an Excel file
+write_xlsx(EP_weights_df, "EP_portfolio_weights.xlsx")
+
+```
+
+###  Compare the Risk and Return of EQW,EP,EP_fil,MVP,MVP_fil and TP,TP_fil
+We now compute the **risk (standard deviation) and return** for both portfolios.
+
+```{r}
+# Compute mean and standard deviation of original returns
+mu_orig <- colMeans(test_returns_data)  # Mean of original returns
+sigma_orig <- apply(test_returns_data, 2, sd)  # Std dev of original returns
+
+# Compute portfolio returns and risk for EQW
+eqw_weights <- rep(1/N.asset, N.asset)  # Equal weights for 55 assets
+eqw_return <- sum(eqw_weights * mu_orig)  # Portfolio return
+eqw_return
+
+# Compute portfolio variance and standard deviation
+eqw_variance <- t(eqw_weights) %*% emp_cov_mat %*% eqw_weights  # Portfolio variance
+eqw_std_dev <- sqrt(eqw_variance)  # Portfolio standard deviation
+eqw_std_dev
+
+# Compute Sharpe ratio
+eqw_sharpe_ratio <- (eqw_return - rf_rate_daily) / eqw_std_dev  # Sharpe ratio
+eqw_sharpe_ratio
+
+MVP_return_sd_function<-function(weights,cov_mat){
+  
+# Compute portfolio returns and risk for MVP 
+mvp_return <- sum(weights * mu_orig)
+#Compute portfolio variance in the scaled space
+mvp_variance <- t(weights) %*% cov_mat %*% weights
+mvp_std_dev <- sqrt(mvp_variance)
+# Compute market-level standard deviation
+#sigma_portfolio_original <- sum(weights * sigma_orig)
+# Compute portfolio standard deviation in original scale
+#mvp_std_dev_original <- mvp_std_dev * sigma_portfolio_original
+MVP_sharpe_ratio <- (mvp_return - rf_rate_daily) / mvp_std_dev
+return(list(return = mvp_return, sd = mvp_std_dev, sr = MVP_sharpe_ratio))
+}
+
+
+
+# Combine returns, standard deviation and sharpe ratio in to  dataframe
+# Compute results for each portfolio
+MVP_results <- list(
+  MVP_emp = MVP_return_sd_function(MVP_emp_weights,emp_cov_mat),
+  MVP_emp_f = MVP_return_sd_function(MVP_emp_f_weights,emp_cov_filtered),
+  MVP_dd = MVP_return_sd_function(MVP_dd_weights,dd_cov_mat),
+  MVP_dd_f = MVP_return_sd_function(MVP_dd_f_weights,dd_cov_filtered),
+  MVP_neuro = MVP_return_sd_function(MVP_neuro_weights,neuro_cov_mat),
+  MVP_neuro_f = MVP_return_sd_function(MVP_neuro_f_weights,neuro_cov_filtered)
+)
+
+# Convert to a dataframe
+MVP_result_df <- data.frame(
+  Portfolio = names(MVP_results),
+  Return = sapply(MVP_results, function(x) x$return),
+  SD = sapply(MVP_results, function(x) x$sd),
+  Sharpe_Ratio = sapply(MVP_results, function(x) x$sr)
+)
+
+# Save as an Excel file
+write_xlsx(MVP_result_df, "MVP_results.xlsx")
+
+xtable(MVP_result_df,digits=c(0,0,4,4,4))
+
+TP_return_sd_function<-function(weights,cov_mat){
+  
+# Compute portfolio returns and risk for TP 
+TP_return <- sum(weights * mu_orig)
+#Compute portfolio variance in the scaled space
+TP_variance <- t(weights) %*% cov_mat %*% weights
+TP_std_dev <- sqrt(TP_variance)
+# Compute market-level standard deviation
+#sigma_portfolio_original <- sum(weights * sigma_orig)
+# Compute portfolio standard deviation in original scale
+#TP_std_dev_original <- TP_std_dev * sigma_portfolio_original
+TP_sharpe_ratio <- (TP_return - rf_rate_daily) / TP_std_dev
+return(list(return = TP_return, sd = TP_std_dev, sr = TP_sharpe_ratio))
+}
+
+
+
+
+
+# Compute results for each portfolio
+TP_results <- list(
+  TP_emp = TP_return_sd_function(TP_emp_weights,emp_cov_mat),
+  TP_emp_f = TP_return_sd_function(TP_emp_f_weights,emp_cov_filtered),
+  TP_dd = TP_return_sd_function(TP_dd_weights,dd_cov_mat),
+  TP_dd_f = TP_return_sd_function(TP_dd_f_weights,dd_cov_filtered),
+  TP_neuro = TP_return_sd_function(TP_neuro_weights,neuro_cov_mat),
+  TP_neuro_f = TP_return_sd_function(TP_neuro_f_weights,neuro_cov_filtered)
+)
+
+# Convert to a dataframe
+TP_result_df <- data.frame(
+  Portfolio = names(TP_results),
+  Return = sapply(TP_results, function(x) x$return),
+  SD = sapply(TP_results, function(x) x$sd),
+  Sharpe_Ratio = sapply(TP_results, function(x) x$sr)
+)
+
+# Save as an Excel file
+write_xlsx(TP_result_df, "TP_results.xlsx")
+
+xtable(TP_result_df,digits=c(0,0,4,4,4))
+
+EP_return_sd_function<-function(weights,cov_mat){
+  
+# Compute portfolio returns and risk for EP 
+EP_return <- sum(weights * mu_orig)
+#Compute portfolio variance in the scaled space
+EP_variance <- t(weights) %*% cov_mat %*% weights
+EP_std_dev <- sqrt(EP_variance)
+# Compute market-level standard deviation
+#sigma_portfolio_original <- sum(weights * sigma_orig)
+# Compute portfolio standard deviation in original scale
+#EP_std_dev_original <- EP_std_dev * sigma_portfolio_original
+EP_sharpe_ratio <- (EP_return - rf_rate_daily) / EP_std_dev
+return(list(return = EP_return, sd = EP_std_dev, sr = EP_sharpe_ratio))
+}
+
+
+
+# Compute results for each portfolio
+EP_results <- list(
+  EP_emp = EP_return_sd_function(EP_emp_weights,emp_cov_mat),
+  EP_emp_f = EP_return_sd_function(EP_emp_f_weights,emp_cov_filtered),
+  EP_dd = EP_return_sd_function(EP_dd_weights,dd_cov_mat),
+  EP_dd_f = EP_return_sd_function(EP_dd_f_weights,dd_cov_filtered),
+  EP_neuro = EP_return_sd_function(EP_neuro_weights,neuro_cov_mat),
+  EP_neuro_f = EP_return_sd_function(EP_neuro_f_weights,neuro_cov_filtered)
+)
+
+# Convert to a structured dataframe
+EP_result_df <- data.frame(
+  Portfolio = names(EP_results),
+  Return = sapply(EP_results, function(x) x$return),
+  SD = sapply(EP_results, function(x) x$sd),
+  Sharpe_Ratio = sapply(EP_results, function(x) x$sr)
+)
+
+# Save as an Excel file
+write_xlsx(EP_result_df, "EP_results.xlsx")
+
+xtable(EP_result_df,digits=c(0,0,4,4,4))
+
+```
+
+### 4. Visualize the Comparison of Risk and Return
+We can now plot **risk vs. return** for both portfolios.
+
+```{r}
+# Create a data frame for visualization
+portfolio_comparison <- data.frame(
+  Portfolio = c("EQW","MVP_emp","MVP_emp_f","MVP_dd","MVP_dd_f","MVP_neuro","MVP_neuro_f","TP_emp","TP_emp_f","TP_dd","TP_dd_f","TP_neuro","TP_neuro_f","EP_emp","EP_emp_f","EP_dd","EP_dd_f","EP_neuro","EP_neuro_f"),
+  #Portfolio = c(1:19),
+  Return = c(eqw_return,MVP_results$MVP_emp[[1]],MVP_results$MVP_emp_f[[1]],MVP_results$MVP_dd[[1]],MVP_results$MVP_dd_f[[1]],MVP_results$MVP_neuro[[1]],MVP_results$MVP_neuro_f[[1]],TP_results$TP_emp[[1]],TP_results$TP_emp_f[[1]],TP_results$TP_dd[[1]],TP_results$TP_dd_f[[1]],TP_results$TP_neuro[[1]],TP_results$TP_neuro_f[[1]],EP_results$EP_emp[[1]],EP_results$EP_emp_f[[1]],EP_results$EP_dd[[1]],EP_results$EP_dd_f[[1]],EP_results$EP_neuro[[1]],EP_results$EP_neuro_f[[1]]),
+  Risk = c(eqw_std_dev,MVP_results$MVP_emp[[2]],MVP_results$MVP_emp_f[[2]],MVP_results$MVP_dd[[2]],MVP_results$MVP_dd_f[[2]],MVP_results$MVP_neuro[[2]],MVP_results$MVP_neuro_f[[2]],TP_results$TP_emp[[2]],TP_results$TP_emp_f[[2]],TP_results$TP_dd[[2]],TP_results$TP_dd_f[[2]],TP_results$TP_neuro[[2]],TP_results$TP_neuro_f[[2]],EP_results$EP_emp[[2]],EP_results$EP_emp_f[[2]],EP_results$EP_dd[[2]],EP_results$EP_dd_f[[2]],EP_results$EP_neuro[[2]],EP_results$EP_neuro_f[[2]])
+)
+
+library(ggplot2)
+
+# Convert Portfolio to a factor to ensure distinct colors
+portfolio_comparison$Portfolio <- as.factor(portfolio_comparison$Portfolio)
+
+myplot <- ggplot(portfolio_comparison, aes(x = Risk, y = Return, label = Portfolio, color = Portfolio)) +
+  geom_point(size = 3) +  # Color is now mapped to Portfolio
+  geom_text(vjust = -0.5, color = "black") +
+  scale_color_manual(values = scales::hue_pal()(19)) +  # Ensure 19 distinct colors
+  labs(title = paste("Window",index), x = "Portfolio Risk", y = "Portfolio Return") +
+  theme_minimal()
+
+ggsave(paste(index, "plot.png"), plot = myplot)
+
+myplot
+
+
+```
+
+#Laplacian Matrix
+```{r}
+
+library(igraph)
+
+laplacian_mat <- function(cov_mat,name) {
+  # Convert covariance matrix to correlation matrix (normalized similarity)
+  threshold = 0.1
+  cor_mat <- cov2cor(cov_mat)
+  
+  # Create adjacency matrix: thresholding correlation values (network structure)
+  adj_mat <- ifelse(abs(cor_mat) > threshold, 1, 0)
+  diag(adj_mat) <- 0  # Remove self-loops
+  
+  # Compute Degree Matrix
+  degree_mat <- diag(rowSums(adj_mat))
+  
+  # Compute Laplacian Matrix
+  laplacian_matrix <- degree_mat - adj_mat
+  
+  # Compute Eigenvalues and Eigenvectors of the Laplacian Matrix
+  eig_laplacian <- eigen(laplacian_matrix, symmetric = TRUE)
+  
+  # Extract eigenvalues and eigenvectors
+  eig_values <- eig_laplacian$values
+  eig_vectors <- eig_laplacian$vectors
+  
+  # Save eigenvalues and eigenvectors to an Excel file
+  library(writexl)
+  eigen_df <- data.frame(Eigenvalues = eig_values)
+  eigenvectors_df <- as.data.frame(eig_vectors)
+  write_xlsx(list(Eigenvalues = eigen_df, Eigenvectors = eigenvectors_df), paste(name,"_Laplacian_Eigen.xlsx"))
+  
+  # Return all results
+  return(list(Laplacian = laplacian_matrix, Eigenvalues = eig_values, Eigenvectors = eig_vectors))
+}
+
+
+laplacian_results_emp <- laplacian_mat(emp_cov_mat,"emp")
+laplacian_results_emp_f <- laplacian_mat(emp_cov_filtered,"emp_f")
+laplacian_results_dd <- laplacian_mat(dd_cov_mat,"dd")
+laplacian_results_dd_f <- laplacian_mat(dd_cov_filtered,"dd_f")
+laplacian_results_neuro <- laplacian_mat(neuro_cov_mat,"neuro")
+laplacian_results_neuro_f <- laplacian_mat(neuro_cov_filtered,"neuro_f")
+
+
+```
+
+```{r}
+library(ggplot2)
+
+# Compute eigenvalues of the DD-Cov matrix
+ddcov_eigvalues <- eigen(dd_cov_mat, symmetric = TRUE)$values
+
+laplacian_eigvalues <- laplacian_results_dd$Eigenvalues
+
+# Convert to data frames for plotting
+df_ddcov <- data.frame(Eigenvalues = ddcov_eigvalues)
+df_laplacian <- data.frame(Eigenvalues = laplacian_eigvalues)
+
+# Create histogram for DD-Cov eigenvalues
+p1 <- ggplot(df_ddcov, aes(x = Eigenvalues)) +
+  geom_histogram(binwidth = 1e-5, fill = "blue", alpha = 0.6, color = "blue") +
+  ggtitle("Correlation of the assets in the market") +
+  xlab("Eigenvalue distributionn of DDcov matrix") + ylab("Frequency") +
+  theme_minimal()
+
+# Create histogram for Laplacian eigenvalues
+p2 <- ggplot(df_laplacian, aes(x = Eigenvalues)) +
+  geom_histogram(binwidth = 0.1, fill = "red", alpha = 0.6, color = "red") +
+  ggtitle("Network structure and strength of the market") +
+  xlab("Eigenvalue distribution of Lapalcian matrix of DDcov matrix") + ylab("Frequency") +
+  theme_minimal()
+
+# Arrange plots one after another
+library(gridExtra)
+grid.arrange(p1, p2, ncol = 1)
+
+```
+
+
+
+#MSE of covariance matrices
+```{r}
+# Define a function to calculate MSE between two matrices
+mse_matrix <- function(estimated_cov, true_cov) {
+  mean((estimated_cov - true_cov)^2)
+}
+
+# Compute MSE for filtered empirical covariance matrix
+mse_empcov_f <- mse_matrix(dd_cov_mat, emp_cov_mat)
+
+# Compute MSE for non filtered and filtered ddcov 
+mse_ddcov <- mse_matrix(dd_cov_mat, emp_cov_mat)
+mse_ddcov_f <- mse_matrix(dd_cov_filtered, emp_cov_mat)
+
+# Compute MSE for non filtered and filtered neurocov
+mse_neurocov <- mse_matrix(neuro_cov_mat, emp_cov_mat)
+mse_neurocov_f <- mse_matrix(neuro_cov_filtered, emp_cov_mat)
+
+# Create a data frame to store MSE values
+mse_results <- data.frame(
+  Covariance_Matrix = c(
+    "Filtered Empirical Covariance",
+    "Non-filtered Data-Driven Covariance",
+    "Filtered Data-Driven Covariance",
+    "Non-filtered Neuro Covariance",
+    "Filtered Neuro Covariance"
+  ),
+  MSE_Value = c(
+    mse_empcov_f,
+    mse_ddcov,
+    mse_ddcov_f,
+    mse_neurocov,
+    mse_neurocov_f
+  )
+)
+
+write_xlsx(mse_results, "MSE_Results.xlsx")
+
+xtable(mse_results,digits=c(0,0,4))
+
+
+```
+
+# Cumulative return plot
+```{r}
+EQW<-as.matrix(test_returns_data)%*%as.vector(rep(1/N.asset, N.asset))
+MVP_emp<-as.matrix(test_returns_data)%*%as.vector(as.numeric(MVP_emp_weights))
+MVP_emp_f<-as.matrix(test_returns_data)%*%as.vector(as.numeric(MVP_emp_f_weights))
+MVP_dd<-as.matrix(test_returns_data)%*%as.vector(as.numeric(MVP_dd_weights))
+MVP_dd_f<-as.matrix(test_returns_data)%*%as.vector(as.numeric(MVP_dd_f_weights))
+MVP_neuro<-as.matrix(test_returns_data)%*%as.vector(as.numeric(MVP_neuro_weights))
+MVP_neuro_f<-as.matrix(test_returns_data)%*%as.vector(as.numeric(MVP_neuro_f_weights))
+TP_emp<-as.matrix(test_returns_data)%*%as.vector(as.numeric(TP_emp_weights))
+TP_emp_f<-as.matrix(test_returns_data)%*%as.vector(as.numeric(TP_emp_f_weights))
+TP_dd<-as.matrix(test_returns_data)%*%as.vector(as.numeric(TP_dd_weights))
+TP_dd_f<-as.matrix(test_returns_data)%*%as.vector(as.numeric(TP_dd_f_weights))
+TP_neuro<-as.matrix(test_returns_data)%*%as.vector(as.numeric(TP_neuro_weights))
+TP_neuro_f<-as.matrix(test_returns_data)%*%as.vector(as.numeric(TP_neuro_f_weights))
+EP_emp<-as.matrix(test_returns_data)%*%as.vector(as.numeric(EP_emp_weights))
+EP_emp_f<-as.matrix(test_returns_data)%*%as.vector(as.numeric(EP_emp_f_weights))
+EP_dd<-as.matrix(test_returns_data)%*%as.vector(as.numeric(EP_dd_weights))
+EP_dd_f<-as.matrix(test_returns_data)%*%as.vector(as.numeric(EP_dd_f_weights))
+EP_neuro<-as.matrix(test_returns_data)%*%as.vector(as.numeric(EP_neuro_weights))
+EP_neuro_f<-as.matrix(test_returns_data)%*%as.vector(as.numeric(EP_neuro_f_weights))
+Portfolio_names = c("EQW","MVP_emp","MVP_emp_f","MVP_dd","MVP_dd_f","MVP_neuro","MVP_neuro_f","TP_emp","TP_emp_f","TP_dd","TP_dd_f","TP_neuro","TP_neuro_f","EP_emp","EP_emp_f","EP_dd","EP_dd_f","EP_neuro","EP_neuro_f")
+Portfolios_cumreturns <- cbind.data.frame(cumsum(EQW),cumsum(MVP_emp),cumsum(MVP_emp_f), cumsum(MVP_dd), cumsum(MVP_dd_f), cumsum(MVP_neuro), cumsum(MVP_neuro_f), cumsum(TP_emp), cumsum(TP_emp_f), cumsum(TP_dd), cumsum(TP_dd_f), cumsum(TP_neuro), cumsum(TP_neuro_f),cumsum(EP_emp), cumsum(EP_emp_f), cumsum(EP_dd), cumsum(EP_dd_f), cumsum(EP_neuro), cumsum(EP_neuro_f))
+colnames(Portfolios_cumreturns) <- Portfolio_names
+
+```
+
+
+```{r}
+row.names(Portfolios_cumreturns) <- row.names(test_returns_data)
+dygraph(Portfolios_cumreturns, main = paste("Window", index))%>%
+dySeries('EQW', label = 'EQW', col = "black") %>% # Eigen portfolio
+dySeries('MVP_emp', label = 'MVP_emp', col = "darkgreen") %>%
+dySeries('MVP_emp_f', label = 'MVP_emp_f', col = "orange") %>%
+dySeries('MVP_dd', label = 'MVP_dd', col = "green") %>%
+dySeries('MVP_dd_f', label = 'MVP_dd_f', col = "grey") %>%  
+dySeries('MVP_neuro', label = 'MVP_neuro', col = "purple") %>%
+dySeries('MVP_neuro_f', label = 'MVP_neuro_f', col = "blue") %>%
+dySeries('TP_emp', label = 'TP_emp', col = "", drawPoints = TRUE) %>% 
+dySeries('TP_emp_f', label = 'TP_emp_f', col = "salmon", drawPoints = TRUE) %>%  
+dySeries('TP_dd', label = 'TP_dd', col = "turquoise", drawPoints = TRUE) %>%  
+dySeries('TP_dd_f', label = 'TP_dd_f', col = "red", drawPoints = TRUE) %>% 
+dySeries('TP_neuro', label = 'TP_neuro', col = "forestgreen", drawPoints = TRUE) %>%  
+dySeries('TP_neuro_f', label = 'TP_neuro_f', col = "brown") %>% 
+dySeries('EP_emp', label = 'EP_emp', col = "darkblue", drawPoints = TRUE) %>% 
+dySeries('EP_emp_f', label = 'EP_emp_f', col = "pink", drawPoints = TRUE) %>%  
+dySeries('EP_dd', label = 'EP_dd', col = "magenta", drawPoints = TRUE) %>%  
+dySeries('EP_dd_f', label = 'EP_dd_f', col = "steelblue", drawPoints = TRUE) %>% 
+dySeries('EP_neuro', label = 'EP_neuro', col = "yellow", drawPoints = TRUE) %>%  
+dySeries('EP_neuro_f', label = 'EP_neuro_f', col = "coral") %>% 
+dyRangeSelector(height = 30)%>%
+  dyLegend(show = "never")
+```

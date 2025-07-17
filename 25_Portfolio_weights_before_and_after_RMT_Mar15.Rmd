@@ -1,0 +1,162 @@
+---
+title: "Portfolio Weights before and after RMT filtering March 14 2025"
+author: "Sulalitha Bowala"
+date: "2025-03-14"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+Here’s an implementation of RMT-based covariance estimation in R, using eigenvalue filtering to improve financial time series analysis.
+
+
+Steps:
+1. Install & Load Required Libraries
+2. Generate Synthetic Financial Data: We simulate N assets over T time periods with an underlying true covariance structure.
+3. Compute Eigenvalues & Eigenvectors
+4. Marchenko-Pastur Theoretical Bounds: According to RMT, random covariance matrices follow the Marchenko-Pastur (MP) law.
+The theoretical bounds for eigenvalues are:
+$$\lambda_{\text{min}, \text{max}} = (1 \pm \sqrt{Q})^2$$
+5. Filter Eigenvalues & Reconstruct Covariance Matrix
+•	Keep only the informative eigenvalues (those outside the MP bulk).
+•	Replace noisy eigenvalues with their mean.
+6. Plot Eigenvalue Distribution: This helps visualize the Marchenko-Pastur bulk and identify informative eigenvalues.
+7. Compare Portfolio Optimization Performance: We test how the denoised covariance matrix improves portfolio allocation stability.
+Compute Portfolio Weights Using Markowitz Optimization
+8. Results & Interpretation
+•	Eigenvalue filtering removes noisy correlations, stabilizing the covariance matrix.
+•	Denoised covariance matrix improves portfolio optimization, reducing overfitting to noise.
+•	More robust asset allocation, as seen in the smoother weight distribution.
+
+
+```{r}
+# Load required libraries
+library(ggplot2)
+library(MASS)
+library(quadprog)
+library(Matrix)  # For nearPD function
+
+# Set random seed for reproducibility
+set.seed(42)
+
+# Parameters
+N <- 100    # Number of assets
+T <- 300    # Number of time periods
+Q <- N / T  # Aspect ratio
+
+# Generate true covariance matrix
+true_cov <- matrix(rnorm(N * N), nrow = N, ncol = N)
+true_cov <- (true_cov + t(true_cov)) / 2  # Make it symmetric
+#diag(true_cov) <- abs(diag(true_cov)) + 0.5  # Add positive values to diagonal
+# Why adding 0.5 to all diagonals
+# Ensure positive definiteness
+true_cov <- as.matrix(nearPD(true_cov)$mat)
+
+# Generate returns
+returns <- mvrnorm(n = T, mu = rep(0, N), Sigma = true_cov)
+
+# Compute empirical covariance matrix
+C <- cov(returns)
+
+# Perform eigendecomposition
+eigen_decomp <- eigen(C)
+eigvals <- eigen_decomp$values
+eigvecs <- eigen_decomp$vectors
+
+# Calculate Marchenko-Pastur bounds
+lambda_min <- (1 - sqrt(Q))^2
+lambda_max <- (1 + sqrt(Q))^2
+
+# Identify informative eigenvalues (there aren't any id we don't add 0.5?)
+informative <- eigvals > lambda_max
+
+# Calculate mean of the bulk eigenvalues
+bulk_mean <- mean(eigvals[!informative])
+
+# RMT filtering function
+filter_rmt <- function(C) {
+  # Perform eigendecomposition
+  eig <- eigen(C)
+  eigvals <- eig$values
+  eigvecs <- eig$vectors
+  
+  # Calculate MP bounds
+  Q <- ncol(C) / nrow(C)
+  lambda_min <- (1 - sqrt(Q))^2
+  lambda_max <- (1 + sqrt(Q))^2
+  
+  # Identify informative eigenvalues
+  informative <- eigvals > lambda_max
+  bulk_mean <- mean(eigvals[!informative])
+  
+  # Reconstruct filtered matrix
+  C_filtered <- eigvecs[, informative] %*% diag(eigvals[informative]) %*% t(eigvecs[, informative])
+  C_filtered <- C_filtered + bulk_mean * diag(nrow(C))
+  
+  return(C_filtered)
+}
+
+# Construct filtered covariance matrix
+C_filtered <- filter_rmt(C)
+
+# MSE function for comparison
+mse <- function(A, B) {
+  return(mean((A - B)^2, na.rm = TRUE))
+}
+
+# Calculate MSE between true and estimated covariances
+mse_original <- mse(C, true_cov)
+mse_filtered <- mse(C_filtered, true_cov)
+
+# Print MSE results
+print(paste("MSE (Original):", mse_original))
+print(paste("MSE (RMT Filtered):", mse_filtered))
+
+# Visualization of eigenvalue distribution
+df <- data.frame(Eigenvalues = eigvals)
+p <- ggplot(df, aes(x = Eigenvalues)) +
+  geom_histogram(binwidth = 0.1, fill = "blue", alpha = 0.6, color = "black") +
+  geom_vline(xintercept = lambda_min, color = "red", linetype = "dashed", size = 1) +
+  geom_vline(xintercept = lambda_max, color = "red", linetype = "dashed", size = 1) +
+  ggtitle("Eigenvalue Distribution vs. Marchenko-Pastur Boundaries") +
+  xlab("Eigenvalue") + ylab("Frequency") +
+  theme_minimal()
+
+# Display the plot
+print(p)
+
+# Portfolio optimization comparison
+# Compute inverse of covariance matrices
+inv_C <- solve(C)
+inv_C_filtered <- solve(C_filtered)
+
+# Assume equal expected returns
+mu <- rep(1, N)
+
+# Compute portfolio weights
+w_opt <- inv_C %*% mu / sum(inv_C %*% mu)
+w_opt_filtered <- inv_C_filtered %*% mu / sum(inv_C_filtered %*% mu)
+
+# Plot portfolio weights comparison
+plot(w_opt, type = "l", col = "red", lwd = 2,
+     ylim = c(min(w_opt, w_opt_filtered), max(w_opt, w_opt_filtered)),
+     main = "Portfolio Weights Before and After RMT Filtering",
+     ylab = "Weight", xlab = "Asset Index")
+lines(w_opt_filtered, col = "blue", lwd = 2)
+legend("topright", legend = c("Original", "RMT-Filtered"),
+       col = c("red", "blue"), lwd = 2)
+```
+
+
+Conclusion:
+
+•	RMT-based filtering is an effective method for improving covariance estimation in financial data.
+•	Applications include portfolio optimization, risk management, and factor modeling.
+•	Future work: Extend to dynamic covariance estimation using rolling windows or deep learning.
+
+
